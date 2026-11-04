@@ -1,0 +1,6 @@
+# Local state and output (contain downloaded Space-Track data; do not commit)
+state/
+reports/
+.env
+__pycache__/
+*.pyc

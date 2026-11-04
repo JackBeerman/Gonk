@@ -1,0 +1,79 @@
+name: Daily orbit report
+
+on:
+  schedule:
+    # 17:41 UTC every day: after Space-Track's daily 17:00 UTC catalog update, and
+    # away from the top/bottom of the hour as Space-Track asks of scheduled scripts.
+    - cron: "41 17 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: gonk-orbit-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SPACETRACK_USER: ${{ secrets.SPACETRACK_USER }}
+      SPACETRACK_PASS: ${{ secrets.SPACETRACK_PASS }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      SATNOGS_API_TOKEN: ${{ secrets.SATNOGS_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check configuration
+        id: config
+        run: |
+          if [ -z "$SPACETRACK_USER" ] || [ -z "$SPACETRACK_PASS" ]; then
+            echo "::warning::Add SPACETRACK_USER and SPACETRACK_PASS repository secrets to enable the daily report."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.config.outputs.ready == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        if: steps.config.outputs.ready == 'true'
+        run: pip install -r requirements.txt
+
+      # The snapshot, history and query ledger persist between runs in the Actions cache.
+      # If the cache is ever lost, the next run simply takes a fresh baseline.
+      - name: Restore state
+        if: steps.config.outputs.ready == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: gonk-state-${{ github.run_id }}
+          restore-keys: gonk-state-
+
+      - name: Build and send report
+        if: steps.config.outputs.ready == 'true'
+        run: python -m gonk run
+
+      # Saved even if the run failed, so the query ledger always records what was fetched.
+      - name: Save state
+        if: always() && steps.config.outputs.ready == 'true' && hashFiles('state/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: gonk-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload report
+        if: always() && steps.config.outputs.ready == 'true' && hashFiles('reports/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: orbit-report-${{ github.run_id }}
+          path: reports/
+          retention-days: 30
