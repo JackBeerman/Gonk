@@ -1,8 +1,9 @@
-"""Command line: python -m gonk {run,baseline,daily,status}"""
+"""Command line: gonk {setup,rules,run,baseline,daily,status} (or python -m gonk ...)"""
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import logging
 import os
@@ -10,22 +11,43 @@ import sys
 from pathlib import Path
 
 from . import emailer, pipeline, report
-from .spacetrack import Ledger, PolicyError, SpaceTrack, SpaceTrackError, utcnow
+from .spacetrack import REQUEST_LIMITS, RULES, Ledger, PolicyError, SpaceTrack, SpaceTrackError, utcnow
 from .store import Store
 
 log = logging.getLogger("gonk")
 
 
-def load_dotenv(path: Path = Path(".env")) -> None:
-    """Minimal .env loader (KEY=VALUE lines). Real environment variables win."""
+def read_env_file(path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines; one pair of surrounding quotes is removed."""
+    out: dict[str, str] = {}
     if not path.exists():
-        return
+        return out
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, val = line.split("=", 1)
-        os.environ.setdefault(key.strip(), val.strip().strip("'\""))
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
+        out[key.strip()] = val
+    return out
+
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    """Load .env into the environment. Real environment variables win."""
+    for key, val in read_env_file(path).items():
+        os.environ.setdefault(key, val)
+
+
+def write_env_file(path: Path, values: dict[str, str]) -> None:
+    """Write .env readable only by the current user (mode 600)."""
+    lines = ["# Gonk settings, written by 'gonk setup'. Keep this file private; it is git-ignored."]
+    lines += [f"{k}='{v}'" for k, v in values.items() if v]
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o600)
 
 
 def client(store: Store, force: bool) -> SpaceTrack:
@@ -98,6 +120,77 @@ def cmd_run(args, store: Store) -> None:
         cmd_baseline(args, store)
 
 
+def print_rules(store: Store) -> None:
+    now = utcnow()
+    ledger = Ledger(store.ledger_path)
+    print("Space-Track API calls Gonk can make (all times UTC)\n")
+    print("Account-wide request limits")
+    print(f"  {'':<28} {'Space-Track rule':<18} Gonk applies")
+    for name, published, ours in REQUEST_LIMITS:
+        print(f"  {name:<28} {published:<18} {ours}")
+    print("\nData classes (Gonk refuses any class not listed here)")
+    print(f"  {'Class':<14} {'Limit':<31} {'Last queried':<18} {'Next allowed':<18} Used for")
+    for cls, rule in RULES.items():
+        last = ledger.last.get(cls)
+        last_txt = last[:16].replace("T", " ") if last else "never"
+        nxt = ledger.next_allowed(cls, now)
+        nxt_txt = "now" if nxt <= now else f"{nxt:%Y-%m-%d %H:%M}"
+        print(f"  {cls:<14} {rule.limit:<31} {last_txt:<18} {nxt_txt:<18} {rule.used_for}")
+    print("\nA normal daily run makes about 6-8 requests. Login and logout also count as requests.")
+    print("--force skips the per-class checks; repeated queries can get the account suspended.")
+    print("Rules: https://www.space-track.org/documentation#/api (API Use Guidelines)")
+
+
+def cmd_rules(args, store: Store) -> None:
+    print_rules(store)
+
+
+def cmd_setup(args, store: Store) -> None:
+    env_path = Path(args.env_file)
+    values = read_env_file(env_path)
+    print("Gonk setup. Your answers are saved to", env_path.resolve())
+    print("That file stays on this computer, is readable only by you, and is never committed.")
+    print("Press Enter to keep a value shown in [brackets].\n")
+
+    def ask(key: str, label: str, default: str = "", secret: bool = False) -> None:
+        current = values.get(key) or default
+        if secret:
+            shown = " [keep current]" if values.get(key) else ""
+            answer = getpass.getpass(f"{label}{shown}: ")
+        else:
+            answer = input(f"{label}{f' [{current}]' if current else ''}: ").strip()
+        values[key] = answer or current
+
+    print("Space-Track.org account (free: https://www.space-track.org/auth/createAccount)")
+    ask("SPACETRACK_USER", "  Username (email)")
+    ask("SPACETRACK_PASS", "  Password (hidden)", secret=True)
+    if not values.get("SPACETRACK_USER") or not values.get("SPACETRACK_PASS"):
+        raise SystemExit("A Space-Track username and password are required.")
+    if not args.no_verify:
+        print("  Checking the login with Space-Track (one login and logout, no data queries)...")
+        try:
+            SpaceTrack(values["SPACETRACK_USER"], values["SPACETRACK_PASS"],
+                       Ledger(store.ledger_path)).verify_login()
+        except SpaceTrackError as e:
+            raise SystemExit(f"  Login failed, nothing saved: {e}")
+        print("  Login OK.")
+
+    if input("\nSet up email delivery now? [y/N]: ").strip().lower().startswith("y"):
+        print("Gmail: use smtp.gmail.com, port 587 and an App Password "
+              "(https://myaccount.google.com/apppasswords).")
+        ask("SMTP_HOST", "  SMTP server", "smtp.gmail.com")
+        ask("SMTP_PORT", "  SMTP port", "587")
+        ask("SMTP_USER", "  SMTP username", values.get("SPACETRACK_USER", ""))
+        ask("SMTP_PASSWORD", "  SMTP password (hidden)", secret=True)
+        ask("EMAIL_FROM", "  Send from", values.get("SMTP_USER", ""))
+        ask("EMAIL_TO", "  Send to (comma-separated)", values.get("EMAIL_FROM", ""))
+
+    write_env_file(env_path, values)
+    print(f"\nSaved {env_path}. Next:")
+    print("  gonk rules     see which API calls are allowed right now")
+    print("  gonk run       first run takes the baseline (after 17:00 UTC); later runs send the daily report")
+
+
 def cmd_status(args, store: Store) -> None:
     if not store.has_baseline():
         print("No baseline yet.")
@@ -105,12 +198,9 @@ def cmd_status(args, store: Store) -> None:
     meta, objects = store.load_catalog()
     print(f"Objects in orbit (snapshot): {len(objects):,}")
     for k, v in meta.items():
-        print(f"{k}: {v}")
-    ledger = Ledger(store.ledger_path).last
-    if ledger:
-        print("Last Space-Track query per class:")
-        for k, v in sorted(ledger.items()):
-            print(f"  {k:<14} {v}")
+        print(f"{k}: {len(v)} recently removed ids" if k == "departed" else f"{k}: {v}")
+    print()
+    print_rules(store)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,6 +216,10 @@ def main(argv: list[str] | None = None) -> int:
                         "queries can get your Space-Track account suspended)")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+    st = sub.add_parser("setup", help="enter your Space-Track login (and optional email settings) into .env")
+    st.add_argument("--env-file", default=".env", help="where to save settings (default ./.env)")
+    st.add_argument("--no-verify", action="store_true", help="save without test-logging in to Space-Track")
+    sub.add_parser("rules", help="show the Space-Track API calls Gonk can make and when each is next allowed")
     sub.add_parser("run", help="baseline on first use, daily report afterwards (use this in cron)")
     b = sub.add_parser("baseline", help="download the full on-orbit catalog as the starting point")
     b.add_argument("--reset", action="store_true", help="replace an existing baseline")
@@ -142,7 +236,8 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     store = Store(Path(args.state_dir))
     try:
-        {"run": cmd_run, "baseline": cmd_baseline, "daily": cmd_daily, "status": cmd_status}[args.cmd](args, store)
+        {"setup": cmd_setup, "rules": cmd_rules, "run": cmd_run, "baseline": cmd_baseline,
+         "daily": cmd_daily, "status": cmd_status}[args.cmd](args, store)
     except PolicyError as e:
         print(f"Not querying Space-Track: {e}", file=sys.stderr)
         return 2

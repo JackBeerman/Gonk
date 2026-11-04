@@ -48,19 +48,41 @@ class PolicyError(RuntimeError):
 
 @dataclass(frozen=True)
 class Rule:
+    used_for: str                       # what Gonk uses this class for
     daily_after_1700: bool = False      # once per UTC day, only after 17:00 UTC
     min_interval: timedelta | None = None
+    source: str = "Space-Track API use guidelines"
+
+    @property
+    def limit(self) -> str:
+        if self.daily_after_1700:
+            return "1 per UTC day, after 17:00 UTC"
+        if self.min_interval == timedelta(hours=1):
+            return "1 per hour"
+        if self.min_interval:
+            return f"1 per {self.min_interval.total_seconds() / 3600:g} hours"
+        return "unrestricted"
 
 
+# The only API classes Gonk will query. Anything else is refused (see Ledger.check).
 RULES: dict[str, Rule] = {
-    "satcat": Rule(daily_after_1700=True),
-    "satcat_debut": Rule(daily_after_1700=True),
-    "satcat_change": Rule(daily_after_1700=True),
-    "decay": Rule(daily_after_1700=True),
-    "boxscore": Rule(daily_after_1700=True),
-    "gp": Rule(min_interval=timedelta(hours=1)),
-    "launch_site": Rule(min_interval=timedelta(hours=24)),
+    "satcat": Rule("Full on-orbit catalog: baseline, then a weekly re-sync", daily_after_1700=True),
+    "satcat_debut": Rule("Objects added to the catalog since the last run", daily_after_1700=True),
+    "satcat_change": Rule("Catalog edits: re-entries, renames, country changes", daily_after_1700=True),
+    "decay": Rule("Re-entry epochs and re-entry forecasts", daily_after_1700=True),
+    "boxscore": Rule("Country names (cached; refreshed weekly)", daily_after_1700=True),
+    "gp": Rule("Current orbital elements and TLEs for new objects", min_interval=timedelta(hours=1)),
+    "launch_site": Rule("Launch site names (cached; refreshed weekly)", min_interval=timedelta(hours=24),
+                        source="No published limit; Gonk self-limits"),
 }
+
+# Account-wide request limits (published) and the stricter limits Gonk applies.
+REQUEST_LIMITS = [
+    ("Requests per minute", "fewer than 30", "at most 20"),
+    ("Requests per hour", "fewer than 300", "at most 200"),
+    ("Spacing between requests", "none published", "at least 2.5 seconds"),
+    ("Retries on errors (429/5xx)", "back off", "wait 60 s, 120 s, 180 s, then stop"),
+]
 
 
 class Ledger:
@@ -92,6 +114,21 @@ class Ledger:
                 f"'{cls}' was queried at {prev_dt:%Y-%m-%d %H:%M} UTC; "
                 f"wait until {(prev_dt + rule.min_interval):%Y-%m-%d %H:%M} UTC."
             )
+
+    def next_allowed(self, cls: str, now: datetime) -> datetime:
+        """Earliest time `cls` may be queried again (now, if allowed now)."""
+        rule = RULES[cls]
+        prev = self.last.get(cls)
+        prev_dt = datetime.fromisoformat(prev) if prev else None
+        t = now
+        if rule.daily_after_1700:
+            if prev_dt and prev_dt.date() >= t.date():
+                t = datetime.combine(prev_dt.date() + timedelta(days=1), datetime.min.time(), t.tzinfo)
+            if t.hour < 17:
+                t = t.replace(hour=17, minute=0, second=0, microsecond=0)
+        if rule.min_interval and prev_dt:
+            t = max(t, prev_dt + rule.min_interval)
+        return t
 
     def record(self, cls: str, now: datetime) -> None:
         self.last[cls] = now.isoformat(timespec="seconds")
@@ -174,6 +211,13 @@ class SpaceTrack:
                 pass
             self.logged_in = False
         self.session.close()
+
+    def verify_login(self) -> None:
+        """Log in and out once to check the credentials (2 requests, no data classes)."""
+        try:
+            self.login()
+        finally:
+            self.close()
 
     # -- queries ---------------------------------------------------------
     def _get(self, path: str) -> list[dict]:

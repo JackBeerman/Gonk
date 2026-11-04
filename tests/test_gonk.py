@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gonk import catalog as cat
 from gonk import confidence as conf
-from gonk import emailer, pipeline, report, satnogs
+from gonk import cli, emailer, pipeline, report, satnogs
 from gonk.spacetrack import Ledger, PolicyError, RateLimiter
 from gonk.store import Store
 
@@ -76,6 +80,16 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(PolicyError):
             self.ledger.check("gp", t + timedelta(minutes=59))
         self.ledger.check("gp", t + timedelta(minutes=61))
+
+    def test_next_allowed(self):
+        self.ledger.record("satcat", datetime(2026, 11, 4, 23, 7, tzinfo=UTC))
+        self.ledger.record("gp", datetime(2026, 11, 4, 23, 8, tzinfo=UTC))
+        now = datetime(2026, 11, 4, 23, 30, tzinfo=UTC)
+        self.assertEqual(self.ledger.next_allowed("satcat", now), datetime(2026, 11, 5, 17, 0, tzinfo=UTC))
+        self.assertEqual(self.ledger.next_allowed("gp", now), datetime(2026, 11, 5, 0, 8, tzinfo=UTC))
+        self.assertEqual(self.ledger.next_allowed("decay", now), now)
+        morning = datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
+        self.assertEqual(self.ledger.next_allowed("decay", morning), datetime(2026, 11, 5, 17, 0, tzinfo=UTC))
 
     def test_unknown_class_refused(self):
         with self.assertRaises(PolicyError):
@@ -323,6 +337,50 @@ class ConfidenceTests(unittest.TestCase):
         p = self.rec(prediction_source="60day_msg")
         conf.assess_prediction(p)
         self.assertEqual(p["confidence"], conf.LOW)
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(["--state-dir", str(self.dir / "state"), *argv])
+        return code, out.getvalue()
+
+    def test_rules_lists_every_class(self):
+        code, out = self.run_cli("rules")
+        self.assertEqual(code, 0)
+        for cls in ("satcat", "satcat_debut", "satcat_change", "decay", "boxscore", "gp", "launch_site"):
+            self.assertIn(cls, out)
+        self.assertIn("fewer than 30", out)
+
+    def test_setup_saves_private_env_file(self):
+        env = self.dir / ".env"
+        password = "p@ss word'#=\"x"
+        answers = iter(["me@example.com", "n"])
+        with mock.patch("builtins.input", lambda *_: next(answers)), \
+             mock.patch("getpass.getpass", lambda *_: password):
+            code, out = self.run_cli("setup", "--env-file", str(env), "--no-verify")
+        self.assertEqual(code, 0)
+        self.assertEqual(env.stat().st_mode & 0o777, 0o600)
+        values = cli.read_env_file(env)
+        self.assertEqual(values["SPACETRACK_USER"], "me@example.com")
+        self.assertEqual(values["SPACETRACK_PASS"], password)
+        self.assertNotIn(password, out)
+
+    def test_setup_keeps_existing_values_on_enter(self):
+        env = self.dir / ".env"
+        cli.write_env_file(env, {"SPACETRACK_USER": "old@example.com", "SPACETRACK_PASS": "secret"})
+        answers = iter(["", "n"])
+        with mock.patch("builtins.input", lambda *_: next(answers)), mock.patch("getpass.getpass", lambda *_: ""):
+            self.run_cli("setup", "--env-file", str(env), "--no-verify")
+        self.assertEqual(cli.read_env_file(env), {"SPACETRACK_USER": "old@example.com", "SPACETRACK_PASS": "secret"})
 
 
 class EmailTests(unittest.TestCase):

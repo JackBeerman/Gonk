@@ -24,10 +24,14 @@ Anyone with a free Space-Track account can run it.
 
 ```bash
 git clone https://github.com/JackBeerman/Gonk.git && cd Gonk
-pip install -r requirements.txt
-cp .env.example .env        # then fill in your Space-Track login and email settings
-python -m gonk run          # first time: baseline. After that: daily report
+pip install .               # installs the `gonk` command
+gonk setup                  # enter your Space-Track login (checked), optional email settings
+gonk rules                  # see which API calls are allowed right now
+gonk run                    # first time: baseline. After that: daily report
 ```
+
+New to the repository? Read [`AGENTS.md`](AGENTS.md) first. It covers setup,
+credentials and the API rules, for people and for AI coding agents.
 
 Reports are written to `reports/<date>-<kind>/` (`report.html`, CSVs,
 `summary.txt`), and `reports/latest.html` always holds the most recent one. If
@@ -73,10 +77,12 @@ to only write the HTML report to disk; you can also run with `--no-email`.
 
 | Command | What it does |
 |---|---|
-| `python -m gonk run` | Baseline on first use, daily report afterwards. Use this one for scheduling. |
-| `python -m gonk baseline [--reset] [--from-json FILE]` | Take or retake the baseline; `--from-json` imports a SATCAT JSON export. |
-| `python -m gonk daily [--full]` | Daily report; `--full` also re-downloads and diffs the full catalog. |
-| `python -m gonk status` | Show the snapshot and when each API class was last queried. |
+| `gonk setup` | Enter your Space-Track login (verified) and optional email settings; saved to a private `.env`. |
+| `gonk rules` | Show every Space-Track API call Gonk can make, its limit, and when it is next allowed. |
+| `gonk run` | Baseline on first use, daily report afterwards. Use this one for scheduling. |
+| `gonk baseline [--reset] [--from-json FILE]` | Take or retake the baseline; `--from-json` imports a SATCAT JSON export. |
+| `gonk daily [--full]` | Daily report; `--full` also re-downloads and diffs the full catalog. |
+| `gonk status` | Show the snapshot and when each API class was last queried. |
 
 Global options: `--state-dir` (default `./state`), `--out-dir` (default
 `./reports`), `--no-email`, `--force`, `-v`.
@@ -155,5 +161,5 @@ python -m unittest -v        # offline tests; no network or account needed
 Code layout: `gonk/spacetrack.py` (API client and usage rules), `gonk/pipeline.py`
 (baseline and daily diff), `gonk/catalog.py` (normalization, orbit
 classification), `gonk/report.py` (HTML/CSV), `gonk/emailer.py` (SMTP),
-`gonk/satnogs.py` (radio frequencies). `spacetrack_new.py` is a stand-alone script
-that lists recent launches by launch date.
+`gonk/satnogs.py` (radio frequencies), `gonk/confidence.py` (ratings). You can
+also run any command as `python -m gonk ...` without installing.
