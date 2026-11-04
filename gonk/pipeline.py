@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import catalog as cat
+from . import confidence as conf
 from . import satnogs
 from .spacetrack import PolicyError, SpaceTrack
 from .store import Store, age_days
@@ -30,6 +31,7 @@ log = logging.getLogger(__name__)
 FULL_SYNC_DAYS = 7
 REFS_MAX_AGE_DAYS = 7
 PREDICTION_WINDOW_DAYS = 7
+REPORT_ONLY = {"prov", "confidence", "confidence_basis", "rf"}
 
 
 @dataclass
@@ -99,8 +101,10 @@ def _enrich_new(st: SpaceTrack, store: Store, recs: list[dict], refs: dict,
     rf = satnogs.load_transmitters(store.root, now) if recs else {}
     for r in recs:
         cat.apply_refs(r, refs["countries"], refs["sites"])
-        if rf.get(r["norad"]):
-            r["rf"] = rf[r["norad"]]
+        entries = [{"text": satnogs.summarize(tx), **conf.assess_rf(tx, r)} for tx in rf.get(r["norad"], [])]
+        if entries:
+            r["rf"] = sorted(entries, key=lambda x: -conf.RANK[x["confidence"]])
+        conf.assess_new(r, now)
 
 
 def run_baseline(st: SpaceTrack | None, store: Store, now: datetime,
@@ -185,6 +189,7 @@ def run_daily(st: SpaceTrack, store: Store, now: datetime, force_full: bool = Fa
         launch, end = _parse_ts(rec.get("launch_date")), _parse_ts(rec.get("decay_date"))
         if launch and end:
             rec["days_in_orbit"] = (end - launch).days
+        conf.assess_removal(rec)
         res.gone.append(rec)
 
     # -- renames / country changes -----------------------------------------
@@ -221,8 +226,9 @@ def run_daily(st: SpaceTrack, store: Store, now: datetime, force_full: bool = Fa
                 latest[norad] = d
     for norad, d in sorted(latest.items(), key=lambda kv: kv[1]["DECAY_EPOCH"]):
         rec = objects[norad]
-        res.predictions.append({**rec, "predicted_epoch": d["DECAY_EPOCH"],
-                                "prediction_source": d.get("SOURCE")})
+        pred = {**rec, "predicted_epoch": d["DECAY_EPOCH"], "prediction_source": d.get("SOURCE")}
+        conf.assess_prediction(pred)
+        res.predictions.append(pred)
 
     # -- update snapshot -----------------------------------------------------
     today = now.date().isoformat()
@@ -232,8 +238,8 @@ def run_daily(st: SpaceTrack, store: Store, now: datetime, force_full: bool = Fa
     for r in new_recs:
         if r.get("decay_date"):
             departed[str(r["norad"])] = today   # appeared and re-entered between runs
-        else:
-            objects[r["norad"]] = r
+        else:  # report-only fields (ratings, radio lookups) are not kept in the snapshot
+            objects[r["norad"]] = {k: v for k, v in r.items() if k not in REPORT_ONLY}
     cutoff = (now - timedelta(days=30)).date().isoformat()
     meta["departed"] = {k: v for k, v in departed.items() if v >= cutoff}
     res.new = sorted(new_recs, key=lambda r: (r.get("launch_date") or "", r["norad"]), reverse=True)

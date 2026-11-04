@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from html import escape
 
 from .catalog import RECORD_FIELDS
+from . import confidence as conf
 from .pipeline import RunResult
 
 # Palette (validated reference palette: categorical slots 1-2 for new/removed).
@@ -172,6 +173,44 @@ def plural(word: str, n: int) -> str:
     return word if word.endswith("s") else word + "s"
 
 
+BARS = {conf.HIGH: 3, conf.MEDIUM: 2, conf.LOW: 1}
+
+
+def meter(level: str) -> str:
+    """Three-bar signal meter: the number of filled bars encodes the level (not color alone)."""
+    filled = BARS[level]
+    bars = "".join(
+        f'<span style="display:inline-block;width:4px;height:{6 + 2 * i}px;margin-right:1px;'
+        f'vertical-align:bottom;border:1px solid {TEXT2};background:{TEXT2 if i < filled else "#fff"}"></span>'
+        for i in range(3))
+    return f'<span style="display:inline-block;vertical-align:baseline">{bars}</span>'
+
+
+def conf_label(level: str) -> str:
+    weight = "600" if level == conf.LOW else "400"
+    return f'<span style="white-space:nowrap;font-weight:{weight}">{meter(level)} {level.title()}</span>'
+
+
+def conf_cell(level: str | None, basis: str = "") -> str:
+    if not level:
+        return f'<span style="color:{MUTED}">–</span>'
+    out = conf_label(level)
+    if basis:
+        out += f'<div style="font-size:11px;color:{TEXT2};margin-top:2px">{e(basis)}</div>'
+    return out
+
+
+def conf_counts(records: list[dict]) -> str:
+    c = Counter(r.get("confidence") for r in records if r.get("confidence"))
+    parts = [f"{conf_label(k)} {c[k]:,}" for k in (conf.HIGH, conf.MEDIUM, conf.LOW) if c.get(k)]
+    return " &nbsp;·&nbsp; ".join(parts)
+
+
+def method_html() -> str:
+    rows = [[f"<b>{e(src)}</b>", e(what), e(rule)] for src, what, rule in conf.METHOD]
+    return table(["Source", "Provides", "How it is rated"], rows)
+
+
 def badge(text: str, color: str = TEXT2) -> str:
     return (f'<span style="display:inline-block;font-size:11px;color:{color};border:1px solid {RULE};'
             f'border-radius:10px;padding:0 6px;margin-left:4px;white-space:nowrap">{e(text)}</span>')
@@ -194,7 +233,9 @@ def wrap(title: str, subtitle: str, sections: list[str], footer: str) -> str:
 
 
 FOOTER = ("Data: Space-Track.org (U.S. Space Force, 18th/19th Space Defense Squadrons); radio frequencies, "
-          "where shown, from the SatNOGS DB community database. “New” means newly added to the public "
+          "where shown, from the SatNOGS DB community database, which is not an official source. Every fact "
+          "carries a source and a High/Medium/Low confidence rating; the attached CSVs list both, with the "
+          "reason, for each field. “New” means newly added to the public "
           "catalog — new launches typically take days to weeks to be cataloged, and occasionally "
           "long-tracked older objects (such as debris) are cataloged for the first time. Orbits for new "
           "objects come from their first published element sets and will refine over time. "
@@ -208,13 +249,17 @@ CSV_EXTRA = ["decay_epoch", "decay_source", "days_in_orbit", "removal_reason",
 
 def to_csv(records: list[dict]) -> str:
     buf = io.StringIO()
-    fields = RECORD_FIELDS + [f for f in CSV_EXTRA if any(f in r for r in records)]
+    flat = [conf.flatten(r) for r in records]
+    rated = sorted({k for f in flat for k in f})
+    fields = (RECORD_FIELDS + [f for f in CSV_EXTRA if any(f in r for r in records)]
+              + (["confidence", "confidence_basis"] if any("confidence" in r for r in records) else [])
+              + rated)
     w = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
     w.writeheader()
-    for r in records:
-        row = dict(r)
+    for r, f in zip(records, flat):
+        row = {**r, **f}
         if isinstance(row.get("rf"), list):
-            row["rf"] = "; ".join(row["rf"])
+            row["rf"] = "; ".join(f'{x["text"]} [{x["confidence"]}: {x["basis"]}]' for x in row["rf"])
         w.writerow(row)
     return buf.getvalue()
 
@@ -275,16 +320,17 @@ def new_objects_html(new: list[dict], run_at: datetime, rows_per_launch: int = R
             name = e(r.get("name"))
             if r.get("decay_date"):
                 name += badge("already re-entered", GONE)
-            rf = "<br>".join(e(x) for x in (r.get("rf") or [])[:2]) or f'<span style="color:{MUTED}">–</span>'
+            rf = "<br>".join(f'{e(x["text"])} {conf_label(x["confidence"])}'
+                             for x in (r.get("rf") or [])[:2]) or f'<span style="color:{MUTED}">none listed</span>'
             rows.append([
                 e(r["norad"]), name, e((r.get("type") or "").title()), e(orbit_text(r)), e(alt_text(r)),
                 fnum(r.get("inclination_deg"), 1), fnum(r.get("period_min"), 1),
-                e((r.get("rcs_size") or "–").title()), rf,
+                conf_cell(r.get("confidence"), r.get("confidence_basis", "")), rf,
             ])
         more = len(recs) - rows_per_launch
         note = f"+ {more} {'more ' if rows else ''}from this launch in new_objects.csv" if more > 0 else ""
         body = (table(["NORAD", "Name", "Type", "Orbit", "Perigee × apogee", "Incl °", "Period min",
-                       "Size", "Radio (SatNOGS)"], rows, note) if rows
+                       "Confidence", "Radio (SatNOGS)"], rows, note) if rows
                 else f'<div style="font-size:12px;color:{MUTED}">{note}</div>')
         out.append(f'<div style="font-size:13px;color:{TEXT};margin:14px 0 6px">{head}</div>' + body)
     if len(groups) > max_launches:
@@ -299,9 +345,11 @@ def removed_html(gone: list[dict], limit: int = MAX_REMOVED_ROWS) -> str:
         when = r.get("decay_epoch") or r.get("decay_date") or "–"
         rows.append([e(r["norad"]), e(r.get("name")), e((r.get("type") or "").title()),
                      e(r.get("country") or r.get("country_code")), e(r.get("launch_date")),
-                     e(when), fnum(r.get("days_in_orbit")), e(r.get("removal_reason"))])
+                     e(when), fnum(r.get("days_in_orbit")), e(r.get("removal_reason")),
+                     conf_cell(r.get("confidence"), r.get("confidence_basis", ""))])
     more = len(gone) - limit
-    return table(["NORAD", "Name", "Type", "Country", "Launched", "Re-entry", "Days up", "Reason"], rows,
+    return table(["NORAD", "Name", "Type", "Country", "Launched", "Re-entry", "Days up", "Reason",
+                  "Confidence"], rows,
                  f"+ {more} more in removed_objects.csv" if more > 0 else "")
 
 
@@ -365,7 +413,8 @@ def build_daily(res: RunResult) -> Report:
                   + two_up(hbar("By orbit", list(by_regime.items()), NEW),
                            hbar("Payloads by constellation", list(by_const.items()), NEW)))
         sections.append(section("New in orbit", charts + NEW_SLOT,
-                                f"{len(res.new):,} objects added to the catalog since {e(since)}, grouped by launch"))
+                                f"{len(res.new):,} objects added to the catalog since {e(since)}, grouped by launch"
+                                f"<br>Confidence: {conf_counts(res.new)}"))
     else:
         sections.append(section("New in orbit", f'<div style="font-size:13px;color:{TEXT2}">'
                                                 f'No objects were added to the catalog since {e(since)}.</div>'))
@@ -395,16 +444,22 @@ def build_daily(res: RunResult) -> Report:
     if res.predictions:
         rows = [[e(p["norad"]), e(p.get("name")), e((p.get("type") or "").title()),
                  e(p.get("country") or p.get("country_code")), e(p["predicted_epoch"]),
-                 e({"TIP_msg": "TIP (high confidence)", "60day_msg": "60-day forecast"}.get(
-                     p.get("prediction_source"), p.get("prediction_source")))]
+                 e({"TIP_msg": "TIP message", "60day_msg": "60-day forecast"}.get(
+                     p.get("prediction_source"), p.get("prediction_source"))),
+                 conf_cell(p.get("confidence"), p.get("confidence_basis", ""))]
                 for p in res.predictions[:30]]
         sections.append(section("Predicted re-entries (next 7 days)",
-                                table(["NORAD", "Name", "Type", "Country", "Predicted (UTC)", "Source"], rows)))
+                                table(["NORAD", "Name", "Type", "Country", "Predicted (UTC)", "Source",
+                                       "Confidence"], rows)))
 
     trend = trend_chart(res.history)
     if trend:
         sections.append(section("Last 30 days", trend))
     sections.append(section("Catalog at a glance", composition(res.objects)))
+    sections.append(section("How confident is this?", method_html(),
+                            "Each object is rated by its weakest catalog or orbit fact. Radio frequencies "
+                            "and constellations are rated separately because they come from a community "
+                            "database or from name matching."))
     notes = list(res.notes)
     if res.full_sync:
         notes.append("Full catalog re-sync performed this run (weekly check for anything the daily feeds missed).")

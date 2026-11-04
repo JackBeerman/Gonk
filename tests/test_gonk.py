@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gonk import catalog as cat
-from gonk import emailer, pipeline, report
+from gonk import confidence as conf
+from gonk import emailer, pipeline, report, satnogs
 from gonk.spacetrack import Ledger, PolicyError, RateLimiter
 from gonk.store import Store
 
@@ -216,12 +217,35 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(set(objects), {100, 102, 103, 200, 201})  # 202 decayed before we saw it
         self.assertEqual(objects[102]["name"], "SHIYAN 30")
 
+        self.assertEqual(new200["confidence"], conf.MEDIUM)          # early elements after launch
+        self.assertEqual(res.gone[0]["confidence"], conf.HIGH)
+        self.assertNotIn("prov", objects[200])                        # ratings stay out of the snapshot
+
         rep = report.build(res)
         self.assertIn("3 new, 1 removed", rep.subject)
+        self.assertIn("How confident is this?", rep.html)
+        header = rep.attachments["new_objects.csv"].splitlines()[0]
+        for col in ("confidence", "confidence_basis", "orbit_confidence", "orbit_source", "name_basis"):
+            self.assertIn(col, header.split(","))
         for needle in ("NEWSAT-1", "already re-entered", "SHIYAN 30", "Predicted re-entries", "LEO · SSO"):
             self.assertIn(needle, rep.html)
         self.assertEqual(set(rep.attachments), {"new_objects.csv", "removed_objects.csv", "predicted_reentries.csv"})
         self.assertIn("tle1", rep.attachments["new_objects.csv"].splitlines()[0])
+
+    def test_rf_entries_are_rated(self):
+        tx = {"norad_cat_id": 200, "description": "UHF telemetry", "downlink_low": 437250000,
+              "mode": "FSK", "baud": 9600, "iaru_coordination": "IARU Coordinated"}
+        orig = satnogs.load_transmitters
+        satnogs.load_transmitters = lambda *a: {200: [tx]}
+        try:
+            res = pipeline.run_daily(FakeSpaceTrack(self.daily_data()), self.store, self.t0 + timedelta(days=1))
+        finally:
+            satnogs.load_transmitters = orig
+        new200 = next(r for r in res.new if r["norad"] == 200)
+        self.assertEqual(new200["rf"][0]["confidence"], conf.HIGH)
+        self.assertIn("437.250 MHz", new200["rf"][0]["text"])
+        csv_text = report.build(res).attachments["new_objects.csv"]
+        self.assertIn("[high: confirmed; IARU-coordinated or ITU-notified]", csv_text)
 
     def test_daily_is_idempotent_over_overlap(self):
         data = self.daily_data()
@@ -243,6 +267,62 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([r["norad"] for r in res.new], [300])
         self.assertEqual([g["norad"] for g in res.gone], [102])
         self.assertTrue(res.gone[0]["removal_reason"].startswith("Removed from public catalog"))
+
+
+class ConfidenceTests(unittest.TestCase):
+    now = datetime(2026, 11, 5, 18, 0, tzinfo=UTC)
+
+    def rec(self, **kw):
+        base = {"norad": 1, "name": "SAT-1", "country_code": "US", "type": "PAYLOAD",
+                "launch_date": "2026-10-01", "perigee_km": 500.0, "apogee_km": 510.0,
+                "epoch": "2026-11-05T06:00:00"}
+        base.update(kw)
+        return base
+
+    def test_orbit_ratings(self):
+        self.assertEqual(conf.assess_orbit(self.rec(), self.now)["confidence"], conf.HIGH)
+        self.assertEqual(conf.assess_orbit(self.rec(epoch="2026-11-01T00:00:00"), self.now)["confidence"], conf.MEDIUM)
+        self.assertEqual(conf.assess_orbit(self.rec(epoch="2026-10-20T00:00:00"), self.now)["confidence"], conf.LOW)
+        early = conf.assess_orbit(self.rec(launch_date="2026-11-04"), self.now)
+        self.assertEqual(early["confidence"], conf.MEDIUM)
+        self.assertIn("after launch", early["basis"])
+        self.assertEqual(conf.assess_orbit(self.rec(perigee_km=None), self.now)["confidence"], conf.LOW)
+
+    def test_overall_is_weakest_catalog_or_orbit_fact(self):
+        r = self.rec(name="OBJECT C")
+        conf.assess_new(r, self.now)
+        self.assertEqual(r["confidence"], conf.MEDIUM)
+        self.assertEqual(r["confidence_basis"], "Name: placeholder name; identification pending")
+        r = self.rec(country_code="TBD")
+        conf.assess_new(r, self.now)
+        self.assertEqual((r["confidence"], r["confidence_basis"]), (conf.LOW, "Country: owner not yet assigned (TBD)"))
+        r = self.rec(constellation="Starlink (SpaceX)")
+        conf.assess_new(r, self.now)
+        self.assertEqual(r["confidence"], conf.HIGH)  # inferred constellation does not lower it
+        self.assertEqual(r["prov"]["constellation"]["confidence"], conf.MEDIUM)
+
+    def test_rf_ratings(self):
+        named, placeholder = self.rec(), self.rec(name="OBJECT A")
+        coordinated = {"iaru_coordination": "IARU Coordinated"}
+        self.assertEqual(conf.assess_rf(coordinated, named)["confidence"], conf.HIGH)
+        self.assertEqual(conf.assess_rf({}, named)["confidence"], conf.MEDIUM)
+        self.assertEqual(conf.assess_rf({"unconfirmed": True, **coordinated}, named)["confidence"], conf.LOW)
+        self.assertEqual(conf.assess_rf({"frequency_violation": True}, named)["confidence"], conf.LOW)
+        self.assertEqual(conf.assess_rf(coordinated, placeholder)["confidence"], conf.LOW)
+
+    def test_removal_and_prediction(self):
+        r = self.rec(decay_date="2026-11-05")
+        conf.assess_removal(r)
+        self.assertEqual(r["confidence"], conf.HIGH)
+        r = self.rec()
+        conf.assess_removal(r)
+        self.assertEqual(r["confidence"], conf.LOW)
+        p = self.rec(prediction_source="TIP_msg")
+        conf.assess_prediction(p)
+        self.assertEqual(p["confidence"], conf.MEDIUM)
+        p = self.rec(prediction_source="60day_msg")
+        conf.assess_prediction(p)
+        self.assertEqual(p["confidence"], conf.LOW)
 
 
 class EmailTests(unittest.TestCase):

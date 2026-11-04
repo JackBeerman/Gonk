@@ -44,8 +44,12 @@ def summarize(tx: dict) -> str:
     return f"{desc}: {freq}{extra}".strip(": ")
 
 
-def load_transmitters(cache_dir: Path, now: datetime) -> dict[int, list[str]]:
-    """Return {norad: [summary, ...]} for alive transmitters, or {} if unavailable."""
+def load_transmitters(cache_dir: Path, now: datetime) -> dict[int, list[dict]]:
+    """Return {norad: [transmitter entry, ...]} for active transmitters, or {} if unavailable.
+
+    Entries are the raw SatNOGS records; gonk.confidence.assess_rf rates each one using
+    its `unconfirmed`, `frequency_violation`, `iaru_coordination` and `itu_notification` fields.
+    """
     if os.environ.get("GONK_SATNOGS", "1") == "0":
         return {}
     cache = Path(cache_dir) / "satnogs_transmitters.json"
@@ -69,9 +73,9 @@ def load_transmitters(cache_dir: Path, now: datetime) -> dict[int, list[str]]:
         rows = json.loads(cache.read_text())
     except (OSError, ValueError):
         return {}
-    out: dict[int, list[str]] = {}
+    out: dict[int, list[dict]] = {}
     for tx in rows:
         norad = tx.get("norad_cat_id")
         if norad and tx.get("alive", True) and tx.get("status", "active") == "active":
-            out.setdefault(int(norad), []).append(summarize(tx))
+            out.setdefault(int(norad), []).append(tx)
     return out

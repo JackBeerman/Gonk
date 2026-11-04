@@ -113,6 +113,25 @@ limits; Space-Track forbids it.
 * Daily queries overlap the previous run by a day and are de-duplicated, so a
   late or skipped run never loses or double-counts objects.
 
+## Confidence ratings
+
+Every reported fact carries its **source** and a **High / Medium / Low** rating
+with a short reason. The email shows each object's overall rating (its weakest
+catalog or orbit fact) as a signal-bar meter. The CSVs have `<field>_source`,
+`<field>_confidence` and `<field>_basis` columns for every rated field. The rules
+are in `gonk/confidence.py`:
+
+| Source | Provides | How it is rated |
+|---|---|---|
+| Space-Track SATCAT | Name, country, type, launch | High by default. Medium for placeholder names (`OBJECT A`). Low when country is TBD or type is TBA/unknown. |
+| Space-Track GP elements | Orbit | High: elements under 2 days old for an object tracked 3+ days. Medium: 2–7 days old, or the first days after launch. Low: older than 7 days or none published. |
+| Derived by Gonk | Orbit class, SSO flag, constellation | Orbit class inherits the orbit's rating. Constellation comes from name matching, so it is at most Medium. |
+| Space-Track decay messages | Re-entries, forecasts | High: re-entry recorded. Low: left the catalog with no decay reported. TIP forecasts Medium, 60-day forecasts Low. |
+| SatNOGS DB (community) | Radio frequencies | High: confirmed and IARU-coordinated or ITU-notified. Medium: confirmed, not coordinated. Low: unconfirmed, a flagged frequency violation, or an object whose identity is still provisional. |
+
+Community and inferred facts (radio frequencies, constellation) are rated
+separately and never raise or lower an object's overall rating.
+
 ## Data notes and limits
 
 * **Radio frequencies are not in Space-Track.** Gonk looks them up in the community
