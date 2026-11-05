@@ -247,17 +247,20 @@ CSV_EXTRA = ["decay_epoch", "decay_source", "days_in_orbit", "removal_reason",
              "predicted_epoch", "prediction_source"]
 
 
-def to_csv(records: list[dict]) -> str:
+# Fixed column order for every CSV Gonk writes, so daily files line up with each other
+# and with the baseline. Columns that don't apply to a record are left empty.
+CSV_COLUMNS = (RECORD_FIELDS + CSV_EXTRA + ["confidence", "confidence_basis"]
+               + [f"{g}_{k}" for g in conf.RATED_GROUPS for k in ("confidence", "source", "basis")])
+
+
+def to_csv(records: list[dict], leading: dict[str, str] | None = None) -> str:
+    """CSV with CSV_COLUMNS; `leading` adds constant columns first (e.g. run_date)."""
     buf = io.StringIO()
-    flat = [conf.flatten(r) for r in records]
-    rated = sorted({k for f in flat for k in f})
-    fields = (RECORD_FIELDS + [f for f in CSV_EXTRA if any(f in r for r in records)]
-              + (["confidence", "confidence_basis"] if any("confidence" in r for r in records) else [])
-              + rated)
-    w = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    lead = leading or {}
+    w = csv.DictWriter(buf, fieldnames=list(lead) + CSV_COLUMNS, extrasaction="ignore")
     w.writeheader()
-    for r, f in zip(records, flat):
-        row = {**r, **f}
+    for r in records:
+        row = {**lead, **r, **conf.flatten(r)}
         if isinstance(row.get("rf"), list):
             row["rf"] = "; ".join(f'{x["text"]} [{x["confidence"]}: {x["basis"]}]' for x in row["rf"])
         w.writerow(row)

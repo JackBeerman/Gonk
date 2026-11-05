@@ -48,13 +48,15 @@ jobs:
         if: steps.config.outputs.ready == 'true'
         run: pip install -r requirements.txt
 
-      # The snapshot, history and query ledger persist between runs in the Actions cache.
-      # If the cache is ever lost, the next run simply takes a fresh baseline.
+      # The snapshot, history, query ledger and CSV dataset persist between runs in the
+      # Actions cache. If the cache is ever lost, the next run simply takes a fresh baseline.
       - name: Restore state
         if: steps.config.outputs.ready == 'true'
         uses: actions/cache/restore@v4
         with:
-          path: state
+          path: |
+            state
+            data
           key: gonk-state-${{ github.run_id }}
           restore-keys: gonk-state-
 
@@ -67,13 +69,17 @@ jobs:
         if: always() && steps.config.outputs.ready == 'true' && hashFiles('state/**') != ''
         uses: actions/cache/save@v4
         with:
-          path: state
+          path: |
+            state
+            data
           key: gonk-state-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Upload report
+      - name: Upload report and CSV data
         if: always() && steps.config.outputs.ready == 'true' && hashFiles('reports/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: orbit-report-${{ github.run_id }}
-          path: reports/
+          path: |
+            reports/
+            data/
           retention-days: 30

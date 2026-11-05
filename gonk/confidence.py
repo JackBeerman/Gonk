@@ -33,6 +33,8 @@ GONK_DERIVED = "Derived by Gonk"
 SATNOGS = "SatNOGS DB (community)"
 
 OVERALL_GROUPS = ("name", "country", "type", "orbit")
+# Every rated field group, in CSV column order.
+RATED_GROUPS = ("name", "country", "type", "orbit", "regime", "constellation", "rf", "removal", "prediction")
 
 PLACEHOLDER_NAME = re.compile(r"^(OBJECT [A-Z]{1,3}|TBA.*|UNKNOWN.*)$")
 UNKNOWN_COUNTRIES = {"TBD", "UNK", ""}

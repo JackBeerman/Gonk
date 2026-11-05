@@ -13,7 +13,7 @@ from pathlib import Path
 
 from gonk import catalog as cat
 from gonk import confidence as conf
-from gonk import cli, emailer, pipeline, report, satnogs
+from gonk import cli, emailer, export, pipeline, report, satnogs
 from gonk.spacetrack import Ledger, PolicyError, RateLimiter
 from gonk.store import Store
 
@@ -337,6 +337,48 @@ class ConfidenceTests(unittest.TestCase):
         p = self.rec(prediction_source="60day_msg")
         conf.assess_prediction(p)
         self.assertEqual(p["confidence"], conf.LOW)
+
+
+class ExportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name) / "data"
+        self.t0 = datetime(2026, 11, 4, 18, 0, tzinfo=UTC)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def read(self, name):
+        import csv as _csv
+        with (self.data / name).open(newline="") as f:
+            return list(_csv.DictReader(f))
+
+    def daily(self, day, new, gone):
+        return pipeline.RunResult(kind="daily", run_at=self.t0 + timedelta(days=day), new=new, gone=gone)
+
+    def test_baseline_then_daily_files(self):
+        objs = {1: cat.from_satcat(satcat_row(1, "SAT A")), 2: cat.from_satcat(satcat_row(2, "OBJECT B"))}
+        export.export(pipeline.RunResult(kind="baseline", run_at=self.t0, objects=objs), self.data)
+        base = self.read("baseline_2026-11-04.csv")
+        self.assertEqual([r["norad"] for r in base], ["1", "2"])
+        self.assertEqual(base[1]["name_confidence"], "medium")       # baseline rows are rated too
+
+        new = [cat.from_satcat(satcat_row(10, "NEW 1"))]
+        export.export(self.daily(1, new, []), self.data)
+        export.export(self.daily(2, [], []), self.data)              # quiet day still gets a file
+        self.assertEqual([r["norad"] for r in self.read("new_2026-11-05.csv")], ["10"])
+        self.assertEqual(self.read("new_2026-11-06.csv"), [])
+        self.assertTrue((self.data / "removed_2026-11-06.csv").exists())
+        self.assertEqual([(r["run_date"], r["norad"]) for r in self.read("new_all.csv")], [("2026-11-05", "10")])
+
+        headers = {(self.data / n).read_text().splitlines()[0]
+                   for n in ("baseline_2026-11-04.csv", "new_2026-11-05.csv", "removed_2026-11-06.csv")}
+        self.assertEqual(len(headers), 1)                             # same columns everywhere
+
+    def test_rerun_same_day_replaces_rows(self):
+        export.export(self.daily(1, [cat.from_satcat(satcat_row(10, "NEW 1"))], []), self.data)
+        export.export(self.daily(1, [cat.from_satcat(satcat_row(11, "NEW 2"))], []), self.data)
+        self.assertEqual([r["norad"] for r in self.read("new_all.csv")], ["11"])
 
 
 class CliTests(unittest.TestCase):

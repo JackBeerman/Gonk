@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import emailer, pipeline, report
+from . import emailer, export, pipeline, report
 from .spacetrack import REQUEST_LIMITS, RULES, Ledger, PolicyError, SpaceTrack, SpaceTrackError, utcnow
 from .store import Store
 
@@ -74,6 +74,8 @@ def write_outputs(rep: report.Report, out_dir: Path, res: pipeline.RunResult) ->
 def deliver(rep: report.Report, res: pipeline.RunResult, args) -> None:
     folder = write_outputs(rep, Path(args.out_dir), res)
     print(f"Report written to {folder}/report.html")
+    files = export.export(res, Path(args.data_dir))
+    print("CSV data: " + ", ".join(str(f) for f in files))
     print(rep.subject)
     if args.no_email:
         return
@@ -210,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="where the snapshot, history and query ledger live (default ./state)")
     p.add_argument("--out-dir", default=os.environ.get("GONK_OUT_DIR", "reports"),
                    help="where reports are written (default ./reports)")
+    p.add_argument("--data-dir", default=os.environ.get("GONK_DATA_DIR", "data"),
+                   help="where the CSV dataset is kept: baseline, one file per day, running totals (default ./data)")
     p.add_argument("--no-email", action="store_true", help="write the report but do not email it")
     p.add_argument("--force", action="store_true",
                    help="skip the once-per-day / after-17:00-UTC checks (use sparingly: repeated "

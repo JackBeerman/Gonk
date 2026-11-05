@@ -41,6 +41,24 @@ email is configured, the report is also sent.
 > and asks automated scripts to fetch catalog data at most once per day, after
 > 17:00 UTC. Gonk refuses to query earlier (see *API rules* below).
 
+## CSV dataset
+
+Alongside the email, every run updates a CSV dataset in `data/` (change it with
+`--data-dir` or `GONK_DATA_DIR`):
+
+| File | Contents |
+|---|---|
+| `baseline_YYYY-MM-DD.csv` | Every object in orbit when the baseline was taken |
+| `new_YYYY-MM-DD.csv` | Objects added to the catalog in that day's run |
+| `removed_YYYY-MM-DD.csv` | Objects that left orbit in that day's run |
+| `new_all.csv` | Every new object from every run, with a `run_date` column |
+| `removed_all.csv` | Every removed object from every run, with a `run_date` column |
+
+A daily file is written even when nothing changed (header only), so there are no
+gaps. All files have the same columns, including each field's source and confidence
+rating, so you can stack them or open them together. On GitHub Actions, `data/` is
+carried between runs in the cache and attached to each run's artifact.
+
 ## Run it every day
 
 **Option A: GitHub Actions (no server needed).** The workflow in

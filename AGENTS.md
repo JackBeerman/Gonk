@@ -21,6 +21,10 @@ gonk rules               # shows which Space-Track API calls are allowed right n
 gonk run                 # after 17:00 UTC: first run takes the baseline, later runs send the daily report
 ```
 
+Each run writes the email report to `reports/` and updates a CSV dataset in `data/`:
+the baseline, one file of new objects and one of removed objects per day, and running
+totals (`new_all.csv`, `removed_all.csv`). See "CSV dataset" in `README.md`.
+
 `gonk setup` stores your settings in `.env` in the repository folder. The file is
 readable only by you (mode 600) and is git-ignored. Run `gonk setup` again at any
 time to change a value; press Enter to keep the current one.
@@ -74,8 +78,10 @@ Things to know:
   start, after 17:00 UTC.
 * **Never ask a person to paste a password into chat.** Ask them to run
   `gonk setup` in their own terminal, or to add repository secrets.
-* Never print, log or commit credentials, `.env`, or the `state/` and `reports/`
-  folders (they hold downloaded Space-Track data).
+* Never print, log or commit credentials, `.env`, or the `state/`, `reports/` and
+  `data/` folders (they hold downloaded Space-Track data).
+* Keep CSV columns fixed (`report.CSV_COLUMNS`); add new columns at the end so older
+  daily files still line up.
 * All Space-Track access goes through `SpaceTrack.fetch()`. To use a new API class,
   first add a `Rule` for it in `RULES` (`gonk/spacetrack.py`), with the limit from
   https://www.space-track.org/documentation#/api. Unlisted classes are refused.
@@ -97,6 +103,7 @@ Things to know:
 | `gonk/confidence.py` | Source and confidence rating rules |
 | `gonk/satnogs.py` | Optional radio-frequency lookup (SatNOGS DB) |
 | `gonk/report.py` | Email HTML, plain text and CSV attachments |
+| `gonk/export.py` | CSV dataset in `data/`: baseline, daily files, running totals |
 | `gonk/emailer.py` | SMTP sending |
 | `gonk/cli.py` | `gonk` command: setup, rules, run, baseline, daily, status |
 | `deploy/github-actions/` | Workflow to copy into `.github/workflows/` |
