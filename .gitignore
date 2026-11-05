@@ -5,3 +5,9 @@ reports/
 __pycache__/
 *.pyc
 data/
+
+# Build and environment folders
+build/
+*.egg-info/
+.venv/
+venv/
