@@ -3,8 +3,10 @@
     baseline_YYYY-MM-DD.csv   every object in orbit when the baseline was taken
     new_YYYY-MM-DD.csv        objects added to the catalog in that day's run
     removed_YYYY-MM-DD.csv    objects that left orbit in that day's run
+    orbit_updates_YYYY-MM-DD.csv  earlier new objects whose first orbit arrived that day
     new_all.csv               every new object from every run, with a run_date column
     removed_all.csv           every removed object from every run, with a run_date column
+    orbit_updates_all.csv     every orbit update from every run, with a run_date column
 
 A daily file is written even on a day with nothing new (header only), so the series
 has no gaps. All files share the same columns (report.CSV_COLUMNS), so they can be
@@ -56,7 +58,7 @@ def export(res: RunResult, data_dir: Path) -> list[Path]:
         path.write_text(to_csv(_rate_baseline(res.objects, res)), encoding="utf-8")
         written.append(path)
         return written
-    for name, records in (("new", res.new), ("removed", res.gone)):
+    for name, records in (("new", res.new), ("removed", res.gone), ("orbit_updates", res.orbit_updates)):
         path = data_dir / f"{name}_{date}.csv"
         path.write_text(to_csv(records), encoding="utf-8")
         _append(data_dir / f"{name}_all.csv", date, records)

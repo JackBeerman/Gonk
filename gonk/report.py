@@ -250,7 +250,9 @@ CSV_EXTRA = ["decay_epoch", "decay_source", "days_in_orbit", "removal_reason",
 # Fixed column order for every CSV Gonk writes, so daily files line up with each other
 # and with the baseline. Columns that don't apply to a record are left empty.
 CSV_COLUMNS = (RECORD_FIELDS + CSV_EXTRA + ["confidence", "confidence_basis"]
-               + [f"{g}_{k}" for g in conf.RATED_GROUPS for k in ("confidence", "source", "basis")])
+               + [f"{g}_{k}" for g in conf.RATED_GROUPS for k in ("confidence", "source", "basis")]
+               # Columns added later go at the end, so older daily files still line up.
+               + ["added"])
 
 
 def to_csv(records: list[dict], leading: dict[str, str] | None = None) -> str:
@@ -444,6 +446,17 @@ def build_daily(res: RunResult) -> Report:
         sections.append(section("Renamed or newly identified", table(["NORAD", "Int'l designator", "Change"], rows),
                                 "Placeholder names such as “OBJECT A” are replaced once an object is identified"))
 
+    if res.orbit_updates:
+        rows = [[e(r["norad"]), e(r.get("name")), e(r.get("added")), e(orbit_text(r)), e(alt_text(r)),
+                 fnum(r.get("inclination_deg"), 1), conf_cell(r.get("confidence"), r.get("confidence_basis", ""))]
+                for r in res.orbit_updates[:25]]
+        more = len(res.orbit_updates) - 25
+        sections.append(section(
+            "Orbits now published",
+            table(["NORAD", "Name", "First reported", "Orbit", "Perigee × apogee", "Incl °", "Confidence"], rows,
+                  f"+ {more} more in orbit_updates.csv" if more > 0 else ""),
+            "Objects from earlier reports whose first orbital elements arrived since the last run"))
+
     if res.predictions:
         rows = [[e(p["norad"]), e(p.get("name")), e((p.get("type") or "").title()),
                  e(p.get("country") or p.get("country_code")), e(p["predicted_epoch"]),
@@ -501,8 +514,24 @@ def build_daily(res: RunResult) -> Report:
         attachments["removed_objects.csv"] = to_csv(res.gone)
     if res.predictions:
         attachments["predicted_reentries.csv"] = to_csv(res.predictions)
+    if res.orbit_updates:
+        attachments["orbit_updates.csv"] = to_csv(res.orbit_updates)
     subject = f"Orbit report {date}: {len(res.new):,} new, {len(res.gone):,} removed ({total:,} in orbit)"
     return Report(subject=subject, html=html, text=text, attachments=attachments)
+
+
+def build_failure(kind: str, when: datetime, error: BaseException) -> Report:
+    """Short email sent when a scheduled run fails, so recipients aren't left waiting."""
+    date = when.date().isoformat()
+    msg = f"{type(error).__name__}: {error}"
+    hint = ("Check the Space-Track login with 'gonk setup', and 'gonk rules' for query limits. "
+            "The next scheduled run will try again; nothing is lost, because the next run covers "
+            "everything since the last successful one.")
+    text = f"Gonk could not build the {kind} orbit report for {date}.\n\n{msg}\n\n{hint}\n"
+    html = wrap(f"Report failed · {date}", f"The {e(kind)} run did not complete",
+                [section("What happened", f'<pre style="white-space:pre-wrap;font-size:12px;color:{TEXT}">{e(msg)}</pre>'
+                         f'<div style="font-size:13px;color:{TEXT2}">{e(hint)}</div>')], FOOTER)
+    return Report(subject=f"Orbit report {date}: run failed", html=html, text=text)
 
 
 def build(res: RunResult) -> Report:

@@ -51,13 +51,24 @@ Alongside the email, every run updates a CSV dataset in `data/` (change it with
 | `baseline_YYYY-MM-DD.csv` | Every object in orbit when the baseline was taken |
 | `new_YYYY-MM-DD.csv` | Objects added to the catalog in that day's run |
 | `removed_YYYY-MM-DD.csv` | Objects that left orbit in that day's run |
+| `orbit_updates_YYYY-MM-DD.csv` | Objects from earlier days whose first orbit was published that day |
 | `new_all.csv` | Every new object from every run, with a `run_date` column |
 | `removed_all.csv` | Every removed object from every run, with a `run_date` column |
+| `orbit_updates_all.csv` | Every orbit update from every run, with a `run_date` column |
 
 A daily file is written even when nothing changed (header only), so there are no
 gaps. All files have the same columns, including each field's source and confidence
 rating, so you can stack them or open them together. On GitHub Actions, `data/` is
 carried between runs in the cache and attached to each run's artifact.
+
+New objects often have no published orbit on their first day. Each daily run
+re-checks objects added in the last 30 days that still lack one, in the same
+batched query, and lists any that arrived under "Orbits now published".
+
+If a scheduled run fails (Space-Track unreachable, login rejected), Gonk emails
+the recipients a short notice with the reason. The next run covers everything
+since the last successful one, so nothing is lost. Runs refused by the API rules
+(for example, a second run on the same day) don't send a notice.
 
 ## Run it every day
 
@@ -147,7 +158,7 @@ are in `gonk/confidence.py`:
 
 | Source | Provides | How it is rated |
 |---|---|---|
-| Space-Track SATCAT | Name, country, type, launch | High by default. Medium for placeholder names (`OBJECT A`). Low when country is TBD or type is TBA/unknown. |
+| Space-Track SATCAT | Name, country, type, launch | High by default. Medium for placeholder names (`OBJECT A`), or a type that contradicts the name (an `R/B` listed as a payload). Low when country is TBD or type is TBA/unknown. |
 | Space-Track GP elements | Orbit | High: elements under 2 days old for an object tracked 3+ days. Medium: 2–7 days old, or the first days after launch. Low: older than 7 days or none published. |
 | Derived by Gonk | Orbit class, SSO flag, constellation | Orbit class inherits the orbit's rating. Constellation comes from name matching, so it is at most Medium. |
 | Space-Track decay messages | Re-entries, forecasts | High: re-entry recorded. Low: left the catalog with no decay reported. TIP forecasts Medium, 60-day forecasts Low. |

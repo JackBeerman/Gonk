@@ -32,6 +32,7 @@ FULL_SYNC_DAYS = 7
 REFS_MAX_AGE_DAYS = 7
 PREDICTION_WINDOW_DAYS = 7
 REPORT_ONLY = {"prov", "confidence", "confidence_basis", "rf"}
+ORBIT_BACKFILL_DAYS = 30
 
 
 @dataclass
@@ -43,6 +44,7 @@ class RunResult:
     gone: list[dict] = field(default_factory=list)
     renamed: list[dict] = field(default_factory=list)
     predictions: list[dict] = field(default_factory=list)
+    orbit_updates: list[dict] = field(default_factory=list)  # earlier new objects whose orbit arrived
     objects: dict[int, dict] = field(default_factory=dict)
     prev_total: int | None = None
     full_sync: bool = False
@@ -87,8 +89,16 @@ def _parse_ts(s: str | None) -> datetime | None:
 
 
 def _enrich_new(st: SpaceTrack, store: Store, recs: list[dict], refs: dict,
-                now: datetime, notes: list[str]) -> None:
-    in_orbit = [r["norad"] for r in recs if not r.get("decay_date")]
+                now: datetime, notes: list[str], pending: list[dict] | None = None) -> list[dict]:
+    """Add orbits, names, radio data and ratings to new records.
+
+    `pending` are snapshot records added on earlier days that still have no published
+    orbit; they are included in the same GP query, updated in place, and returned
+    (as rated copies) when an orbit has now been published.
+    """
+    pending = pending or []
+    in_orbit = [r["norad"] for r in recs if not r.get("decay_date")] + [r["norad"] for r in pending]
+    updated: list[dict] = []
     if in_orbit:
         try:
             gp_rows = st.fetch("gp", ids=in_orbit)
@@ -96,6 +106,12 @@ def _enrich_new(st: SpaceTrack, store: Store, recs: list[dict], refs: dict,
             for r in recs:
                 if r["norad"] in by_id:
                     cat.apply_gp(r, by_id[r["norad"]])
+            for r in pending:
+                if r["norad"] in by_id:
+                    cat.apply_gp(r, by_id[r["norad"]])
+                    copy = dict(r)
+                    conf.assess_new(copy, now)
+                    updated.append(copy)
         except PolicyError as e:
             notes.append(f"Orbital elements not fetched: {e}")
     rf = satnogs.load_transmitters(store.root, now) if recs else {}
@@ -105,6 +121,7 @@ def _enrich_new(st: SpaceTrack, store: Store, recs: list[dict], refs: dict,
         if entries:
             r["rf"] = sorted(entries, key=lambda x: -conf.RANK[x["confidence"]])
         conf.assess_new(r, now)
+    return updated
 
 
 def run_baseline(st: SpaceTrack | None, store: Store, now: datetime,
@@ -168,7 +185,11 @@ def run_daily(st: SpaceTrack, store: Store, now: datetime, force_full: bool = Fa
     # skip objects that left orbit recently: the overlap window would otherwise re-report them.
     departed: dict[str, str] = meta.get("departed", {})
     new_recs = [r for r in {r["norad"]: r for r in new_recs}.values() if str(r["norad"]) not in departed]
-    _enrich_new(st, store, new_recs, refs, now, res.notes)
+    # Objects added in the last 30 days that still had no orbit get re-checked in the same query.
+    added_cutoff = (now - timedelta(days=ORBIT_BACKFILL_DAYS)).date().isoformat()
+    pending = [r for n, r in objects.items()
+               if n not in gone_ids and not r.get("epoch") and (r.get("added") or "") >= added_cutoff]
+    res.orbit_updates = _enrich_new(st, store, new_recs, refs, now, res.notes, pending)
 
     # -- removed objects ---------------------------------------------------
     decay_by_id: dict[int, dict] = {}
@@ -239,7 +260,7 @@ def run_daily(st: SpaceTrack, store: Store, now: datetime, force_full: bool = Fa
         if r.get("decay_date"):
             departed[str(r["norad"])] = today   # appeared and re-entered between runs
         else:  # report-only fields (ratings, radio lookups) are not kept in the snapshot
-            objects[r["norad"]] = {k: v for k, v in r.items() if k not in REPORT_ONLY}
+            objects[r["norad"]] = {**{k: v for k, v in r.items() if k not in REPORT_ONLY}, "added": today}
     cutoff = (now - timedelta(days=30)).date().isoformat()
     meta["departed"] = {k: v for k, v in departed.items() if v >= cutoff}
     res.new = sorted(new_recs, key=lambda r: (r.get("launch_date") or "", r["norad"]), reverse=True)

@@ -245,7 +245,25 @@ def main(argv: list[str] | None = None) -> int:
     except PolicyError as e:
         print(f"Not querying Space-Track: {e}", file=sys.stderr)
         return 2
-    except (SpaceTrackError, emailer.EmailConfigError) as e:
+    except emailer.EmailConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except Exception as e:  # noqa: BLE001 - any failure of a report run is reported, then re-signalled
+        if args.cmd not in ("run", "daily", "baseline"):
+            raise
+        print(f"error: {e}", file=sys.stderr)
+        notify_failure(args, store, e)
+        return 1
     return 0
+
+
+def notify_failure(args, store: Store, error: Exception) -> None:
+    """Email recipients that today's report failed (only if email is configured)."""
+    if args.no_email or not emailer.configured():
+        return
+    kind = "baseline" if args.cmd == "baseline" or not store.has_baseline() else "daily"
+    try:
+        emailer.send(report.build_failure(kind, utcnow(), error))
+        print("Sent a failure notice by email.", file=sys.stderr)
+    except Exception as mail_error:  # noqa: BLE001
+        print(f"Could not send the failure notice: {mail_error}", file=sys.stderr)

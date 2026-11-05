@@ -44,7 +44,8 @@ UNKNOWN_TYPES = {"TBA", "UNKNOWN", ""}
 METHOD = [
     (SPACETRACK_SATCAT, "Name, country, object type, launch date and site",
      "High: the official U.S. Space Force catalog. Medium: placeholder names such as “OBJECT A” "
-     "(identification pending). Low: country listed as TBD or object type TBA/unknown."),
+     "(identification pending), or a type that contradicts the name (an “R/B” listed as a payload). "
+     "Low: country listed as TBD or object type TBA/unknown."),
     (SPACETRACK_GP, "Orbit: perigee, apogee, inclination, period",
      "High: elements under 2 days old for an object tracked 3+ days. Medium: elements 2–7 days old, "
      "or from the first days after launch, when objects are still separating or maneuvering. "
@@ -106,8 +107,13 @@ def assess_identity(rec: dict) -> dict[str, dict]:
     else:
         out["country"] = fact(SPACETRACK_SATCAT, HIGH, "official catalog owner")
     otype = (rec.get("type") or "").upper()
+    name = (rec.get("name") or "").upper()
     if otype in UNKNOWN_TYPES:
         out["type"] = fact(SPACETRACK_SATCAT, LOW, "object type not yet determined")
+    elif re.search(r"\bR/B\b", name) and otype != "ROCKET BODY":
+        out["type"] = fact(SPACETRACK_SATCAT, MEDIUM, f"listed as {otype.lower()}, but the name says rocket body (R/B)")
+    elif re.search(r"\bDEB\b", name) and otype != "DEBRIS":
+        out["type"] = fact(SPACETRACK_SATCAT, MEDIUM, f"listed as {otype.lower()}, but the name says debris (DEB)")
     else:
         out["type"] = fact(SPACETRACK_SATCAT, HIGH, "official catalog type")
     return out

@@ -5,6 +5,19 @@ Guide for people joining this repository, and for AI coding agents working in it
 Gonk produces a daily email of objects entering and leaving Earth orbit, built from
 the Space-Track.org satellite catalog. See `README.md` for what the report contains.
 
+## Joining the project
+
+The repository owner invites you on GitHub (*Settings → Collaborators*). Then:
+
+* Use your **own** Space-Track account and run everything on your own machine.
+  Your login, snapshot, query record and CSV data stay in your clone (`.env`,
+  `state/`, `reports/`, `data/`), which are git-ignored. Nothing personal is
+  shared through the repository.
+* Your install tracks its own API usage, so your runs don't affect anyone else's
+  account limits, and theirs don't affect yours.
+* Changing the code: work on a branch, run `python -m unittest -v`, and open a pull
+  request. Don't commit anything from `state/`, `reports/`, `data/` or `.env`.
+
 ## Get started (people)
 
 You need Python 3.9+ and your **own** free Space-Track account

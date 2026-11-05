@@ -261,6 +261,30 @@ class PipelineTests(unittest.TestCase):
         csv_text = report.build(res).attachments["new_objects.csv"]
         self.assertIn("[high: confirmed; IARU-coordinated or ITU-notified]", csv_text)
 
+    def test_orbit_filled_in_on_a_later_day(self):
+        day1 = {"satcat_debut": [satcat_row(400, "LATE ORBIT", launch="2026-11-04", intldes="2026-251A",
+                                            period=None, incl=None, apo=None, peri=None)], "gp": []}
+        res1 = pipeline.run_daily(FakeSpaceTrack(day1), self.store, self.t0 + timedelta(days=1))
+        self.assertEqual(res1.new[0]["prov"]["orbit"]["basis"], "no orbit published yet")
+        gp = {"NORAD_CAT_ID": "400", "PERIOD": "95.0", "INCLINATION": "53.0", "APOAPSIS": "550",
+              "PERIAPSIS": "540", "ECCENTRICITY": "0.0007", "SEMIMAJOR_AXIS": "6923",
+              "EPOCH": "2026-11-06T06:00:00", "TLE_LINE1": "1 X", "TLE_LINE2": "2 X"}
+        st = FakeSpaceTrack({"gp": [gp]})
+        res2 = pipeline.run_daily(st, self.store, self.t0 + timedelta(days=2))
+        self.assertEqual([c for c in st.calls if c[0] == "gp"], [("gp", (), (400,))])  # one batched query
+        self.assertEqual([r["norad"] for r in res2.orbit_updates], [400])
+        self.assertEqual(res2.orbit_updates[0]["regime"], "LEO")
+        self.assertEqual(res2.orbit_updates[0]["added"], "2026-11-05")
+        _, objects = self.store.load_catalog()
+        self.assertEqual(objects[400]["tle1"], "1 X")
+        self.assertNotIn("prov", objects[400])
+        rep = report.build(res2)
+        self.assertIn("Orbits now published", rep.html)
+        self.assertIn("orbit_updates.csv", rep.attachments)
+        st3 = FakeSpaceTrack({"gp": [gp]})
+        pipeline.run_daily(st3, self.store, self.t0 + timedelta(days=3))
+        self.assertEqual([c for c in st3.calls if c[0] == "gp"], [])  # no longer pending
+
     def test_daily_is_idempotent_over_overlap(self):
         data = self.daily_data()
         pipeline.run_daily(FakeSpaceTrack(data), self.store, self.t0 + timedelta(days=1))
@@ -314,6 +338,15 @@ class ConfidenceTests(unittest.TestCase):
         conf.assess_new(r, self.now)
         self.assertEqual(r["confidence"], conf.HIGH)  # inferred constellation does not lower it
         self.assertEqual(r["prov"]["constellation"]["confidence"], conf.MEDIUM)
+
+    def test_type_that_contradicts_name(self):
+        r = self.rec(name="GSLV R/B", type="PAYLOAD")
+        conf.assess_new(r, self.now)
+        self.assertEqual(r["prov"]["type"]["confidence"], conf.MEDIUM)
+        self.assertIn("name says rocket body", r["confidence_basis"])
+        r = self.rec(name="CZ-6A R/B", type="ROCKET BODY")
+        conf.assess_new(r, self.now)
+        self.assertEqual(r["prov"]["type"]["confidence"], conf.HIGH)
 
     def test_rf_ratings(self):
         named, placeholder = self.rec(), self.rec(name="OBJECT A")
@@ -372,8 +405,10 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([(r["run_date"], r["norad"]) for r in self.read("new_all.csv")], [("2026-11-05", "10")])
 
         headers = {(self.data / n).read_text().splitlines()[0]
-                   for n in ("baseline_2026-11-04.csv", "new_2026-11-05.csv", "removed_2026-11-06.csv")}
+                   for n in ("baseline_2026-11-04.csv", "new_2026-11-05.csv", "removed_2026-11-06.csv",
+                             "orbit_updates_2026-11-06.csv")}
         self.assertEqual(len(headers), 1)                             # same columns everywhere
+        self.assertTrue(headers.pop().endswith(",added"))             # later columns appended at the end
 
     def test_rerun_same_day_replaces_rows(self):
         export.export(self.daily(1, [cat.from_satcat(satcat_row(10, "NEW 1"))], []), self.data)
@@ -415,6 +450,27 @@ class CliTests(unittest.TestCase):
         self.assertEqual(values["SPACETRACK_USER"], "me@example.com")
         self.assertEqual(values["SPACETRACK_PASS"], password)
         self.assertNotIn(password, out)
+
+    def test_failed_run_sends_notice(self):
+        sent = []
+        env = {"SMTP_HOST": "smtp.example.com", "EMAIL_TO": "team@example.com"}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(cli, "client", side_effect=cli.SpaceTrackError("Login failed (HTTP 200).")), \
+             mock.patch.object(emailer, "send", lambda rep: sent.append(rep)):
+            code, _ = self.run_cli("run")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("run failed", sent[0].subject)
+        self.assertIn("Login failed", sent[0].text)
+
+    def test_policy_refusal_sends_no_notice(self):
+        sent = []
+        env = {"SMTP_HOST": "smtp.example.com", "EMAIL_TO": "team@example.com"}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(cli, "client", side_effect=cli.PolicyError("already queried today")), \
+             mock.patch.object(emailer, "send", lambda rep: sent.append(rep)):
+            code, _ = self.run_cli("run")
+        self.assertEqual((code, sent), (2, []))
 
     def test_setup_keeps_existing_values_on_enter(self):
         env = self.dir / ".env"
